@@ -1,0 +1,77 @@
+USE [USAGE_STATS]
+GO
+/****** Object:  StoredProcedure [dbo].[UbyC_3_2_DATE_LOOKUP_RunAPI]    Script Date: 3/21/2025 8:08:52 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER PROCEDURE [dbo].[UbyC_3_2_DATE_LOOKUP_RunAPI] 
+AS
+BEGIN
+	-- Issue ID fetch
+	DECLARE @articleID VARCHAR(32)
+	DECLARE @articleDate VARCHAR(32)
+	DECLARE @process INT =1	-- 1 = Run process
+	DECLARE @xml XML
+	DECLARE @sql VARCHAR(512)
+	DECLARE @httpRequest NVARCHAR(4000)
+
+	WHILE @process =1
+	BEGIN
+		-- Loop uses YOP field for test...  sometimes ArticleDate resolves to NULL
+		DECLARE dateCursor CURSOR FOR
+		SELECT	articleID
+		FROM	dbo.STATS_VIEWS_BY_PRODUCT_PROC
+		WHERE	yop IS NULL
+		AND articledate IS NULL
+
+		OPEN dateCursor
+		FETCH NEXT FROM dateCursor INTO @articleID
+
+		WHILE (@@FETCH_STATUS = 0)
+		BEGIN		
+			SET @articleDate = NULL
+			SET @httpRequest = 'http://maxmisapi.newsbank.com/Default.aspx?OPERATION=GetArticleDate&ARTICLEID=' + @articleID
+			SET @xml = '<result xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" rc="1" version="1.0.0.0" requestid="75D0ED396C054C0D82411A4F8231313C" starttime="2025-03-21 17.00.18.321" endtime="2025-03-21 17.00.19.995" processtime="1674.11ms">
+<records>
+<record YMD="2024-09-30" UNQ="19B1771B0FCCBD20"/>
+<record YMD="2025-03-09" UNQ="19F358306ABC758F"/>
+</records>
+</result>'
+			-- dbo.GetHttp(@httpRequest)
+
+			select @articleDate = tbl.col.value( '.' , 'varchar(2048)')
+			FROM @xml.nodes('result/field') tbl(Col)
+			WHERE tbl.col.value('@name','varchar(255)') = 'YMD'
+			
+			IF (ISNULL(@articleDate,'') != '')
+			BEGIN
+				BEGIN TRY
+					UPDATE 	dbo.STATS_VIEWS_BY_PRODUCT_PROC
+					SET 	articleDate = @articleDate, yop='0001' -- 0001 = Placeholder to show record was Processed
+					WHERE 	articleID = @articleID
+				END TRY
+				BEGIN CATCH
+					-- Not sure what will be done with these, but record them for now
+					INSERT INTO ArticleAging_API_Errors(article_id, create_date, err_msg)
+					SELECT @articleID, GetDate(), ERROR_MESSAGE()
+				END CATCH
+			END
+
+			FETCH NEXT FROM dateCursor INTO @articleID
+		END
+
+		CLOSE dateCursor
+		DEALLOCATE dateCursor
+
+		IF EXISTS (
+			SELECT 'Y' 
+			FROM	dbo.STATS_VIEWS_BY_PRODUCT_PROC
+			WHERE	yop IS NULL
+			AND articledate IS NULL
+		)
+			SET @process = 1
+		ELSE 
+			SET @process = 0
+	END
+END
